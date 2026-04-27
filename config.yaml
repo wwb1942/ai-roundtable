@@ -1,0 +1,14 @@
+participants:
+  - id: claude
+    plugin: claude
+  - id: codex
+    plugin: codex
+
+settings:
+  max_rounds: 12
+  convergence_threshold: 2
+  stalemate_threshold: 2
+  context_window: 3
+  call_timeout: 120
+  renderer: terminal
+  output_mode: report
