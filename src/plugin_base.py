@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Protocol, runtime_checkable
-from src.models import ParticipantCapabilities, ParticipantTurnResult, RoundContext
+from src.models import ParticipantCapabilities, ParticipantTurnResult, RoundContext, ValidationResult
 
 @runtime_checkable
 class ParticipantPlugin(Protocol):
@@ -8,7 +8,7 @@ class ParticipantPlugin(Protocol):
     display_name: str
     capabilities: ParticipantCapabilities
 
-    def validate(self) -> None: ...
+    def validate(self) -> ValidationResult: ...
     def start_session(self, topic: str, system_contract: str) -> str | None: ...
     def send_turn(self, session_id: str | None, round_context: RoundContext) -> ParticipantTurnResult: ...
     def interrupt(self, session_id: str | None) -> bool: ...

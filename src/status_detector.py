@@ -5,16 +5,23 @@ from difflib import SequenceMatcher
 
 def parse_status_block(text: str) -> dict | None:
     pattern = r"<<<ROUNDTABLE_STATUS>>>\s*\n(.*?)\n\s*<<<END_STATUS>>>"
-    match = re.search(pattern, text, re.DOTALL)
-    if not match:
+    matches = list(re.finditer(pattern, text, re.DOTALL))
+    if not matches:
         return None
     try:
-        data = json.loads(match.group(1).strip())
+        data = json.loads(matches[-1].group(1).strip())
         if "status" in data:
+            if len(matches) > 1:
+                data["warning"] = "multiple_status_blocks"
+                data["status_block_count"] = len(matches)
             return data
         return None
     except (json.JSONDecodeError, KeyError):
         return None
+
+def extract_content_without_status_blocks(text: str) -> str:
+    pattern = r"<<<ROUNDTABLE_STATUS>>>\s*\n.*?\n\s*<<<END_STATUS>>>"
+    return re.sub(pattern, "", text, flags=re.DOTALL).strip()
 
 def heuristic_detect(
     prev_same: str | None,

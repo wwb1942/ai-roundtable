@@ -43,3 +43,7 @@ def test_file_persists(log_dir):
     log1.append("session_started", {"topic": "persist"})
     log2 = EventLog(log_dir, "test-session")
     assert len(log2.read_all()) == 1
+
+def test_rejects_path_traversal_session_id(log_dir):
+    with pytest.raises(ValueError):
+        EventLog(log_dir, "../escape")

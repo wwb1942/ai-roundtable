@@ -8,18 +8,20 @@ def generate_report(
     turns: list[dict],
 ) -> tuple[str, str]:
     conclusion = _extract_conclusion(turns, end_reason)
-    recommendations = ["基于讨论内容的建议（需人工审核）"]
-    risks = ["讨论中识别的风险点（需人工确认）"]
+    recommendations = ["Review the discussion log and turn the agreed points into concrete next steps."]
+    risks = ["Validate assumptions manually before executing the generated plan."]
     open_questions: list[str] = []
-    dissent: list[str] = []
+    disagreements: list[str] = []
     confidence = "high" if end_reason == "converged" else "medium" if end_reason == "max_rounds" else "low"
     plan_ready = end_reason == "converged" and not open_questions
+    plan_ready_reason = "discussion converged" if plan_ready else "discussion is not sufficiently actionable yet"
 
     result = {
         "topic": topic, "participants": participants, "end_reason": end_reason,
         "final_conclusion": conclusion, "recommendations": recommendations,
-        "risks": risks, "open_questions": open_questions, "dissent": dissent,
+        "risks": risks, "open_questions": open_questions, "disagreements": disagreements,
         "confidence": confidence, "plan_ready": plan_ready,
+        "plan_ready_reason": plan_ready_reason,
     }
 
     md = _render_markdown(result, turns, end_reason)
@@ -28,10 +30,10 @@ def generate_report(
 
 def _extract_conclusion(turns: list[dict], end_reason: str) -> str:
     if not turns:
-        return "讨论未产生足够内容以形成结论。"
+        return "The discussion did not produce enough content to form a conclusion."
     last_contents = [t["content"] for t in turns[-2:]]
     if end_reason == "degraded":
-        return f"阶段性判断（非圆桌共识）：{last_contents[-1][:200]}"
+        return f"Staged assessment (not roundtable consensus): {last_contents[-1][:200]}"
     return last_contents[-1][:300]
 
 def _render_markdown(result: dict, turns: list[dict], end_reason: str) -> str:
@@ -41,6 +43,7 @@ def _render_markdown(result: dict, turns: list[dict], end_reason: str) -> str:
     lines.append(f"**End Reason:** {result['end_reason']}")
     lines.append(f"**Confidence:** {result['confidence']}")
     lines.append(f"**Plan Ready:** {result['plan_ready']}")
+    lines.append(f"**Plan Ready Reason:** {result['plan_ready_reason']}")
     lines.append("")
     lines.append("## Final Conclusion")
     lines.append(result["final_conclusion"])
@@ -52,10 +55,10 @@ def _render_markdown(result: dict, turns: list[dict], end_reason: str) -> str:
     lines.append("## Risks")
     for r in result["risks"]:
         lines.append(f"- {r}")
-    if result["dissent"]:
+    if result["disagreements"]:
         lines.append("")
         lines.append("## Remaining Disagreements")
-        for d in result["dissent"]:
+        for d in result["disagreements"]:
             lines.append(f"- {d}")
     if result["open_questions"]:
         lines.append("")
@@ -64,7 +67,7 @@ def _render_markdown(result: dict, turns: list[dict], end_reason: str) -> str:
             lines.append(f"- {q}")
     if end_reason == "degraded":
         lines.append("")
-        lines.append("> 注意：本报告为阶段性判断，非完整圆桌共识。")
+        lines.append("> Note: this is a staged degraded-mode assessment, not full roundtable consensus.")
     lines.append("")
     lines.append("## Discussion Log")
     for t in turns:

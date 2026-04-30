@@ -2,8 +2,8 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from src.models import ParticipantCapabilities, ParticipantTurnResult, RoundContext
-from src.status_detector import parse_status_block
+from src.models import ParticipantCapabilities, ParticipantTurnResult, RoundContext, ValidationResult
+from src.status_detector import extract_content_without_status_blocks, parse_status_block
 
 class ClaudePlugin:
     id = "claude"
@@ -16,43 +16,87 @@ class ClaudePlugin:
         "supports_artifacts": False,
     }
 
-    def __init__(self, command: str = "claude", timeout: int = 120):
+    def __init__(
+        self,
+        command: str = "claude",
+        args: list[str] | None = None,
+        timeout: int = 120,
+    ):
         self._command = command
+        self._args = args if args is not None else ["--print"]
         self._timeout = timeout
 
-    def validate(self) -> None:
+    def validate(self) -> ValidationResult:
         if not shutil.which(self._command):
-            raise RuntimeError(f"{self._command} CLI not found on PATH")
+            return {"ok": False, "errors": [f"{self._command} CLI not found on PATH"], "warnings": []}
+        return {"ok": True, "errors": [], "warnings": []}
 
     def start_session(self, topic: str, system_contract: str) -> str | None:
         return None
 
     def send_turn(self, session_id: str | None, round_context: RoundContext) -> ParticipantTurnResult:
         prompt = self._build_prompt(round_context)
+        command = shutil.which(self._command) or self._command
         start = time.monotonic()
         try:
             result = subprocess.run(
-                [self._command, "--print", "-p", prompt],
+                [command, *self._args, "-p", prompt],
                 capture_output=True, text=True, timeout=self._timeout,
                 encoding="utf-8",
             )
             duration = int((time.monotonic() - start) * 1000)
             output = result.stdout.strip()
             status_data = parse_status_block(output)
-            content = output.split("<<<ROUNDTABLE_STATUS>>>")[0].strip()
+            content = extract_content_without_status_blocks(output)
+            protocol_error = _detect_protocol_violation(content)
+            error = None
+            if protocol_error:
+                error = protocol_error
+            elif result.returncode != 0:
+                error = {
+                    "code": "non_zero_exit",
+                    "message": f"exit code {result.returncode}",
+                    "detail": result.stderr.strip() or None,
+                }
             return ParticipantTurnResult(
                 content=content, raw_output=output,
                 status=status_data["status"] if status_data else "unknown",
                 status_summary=status_data.get("summary") if status_data else None,
-                artifacts=[], error=None if result.returncode == 0 else f"exit code {result.returncode}",
+                artifacts=[], error=error,
                 duration_ms=duration,
+                session_id=None,
+                token_usage=None,
+                cost_usd=None,
+            )
+        except FileNotFoundError:
+            duration = int((time.monotonic() - start) * 1000)
+            return ParticipantTurnResult(
+                content="", raw_output="", status="unknown",
+                status_summary=None, artifacts=[],
+                error={
+                    "code": "command_not_found",
+                    "message": f"{self._command} CLI not found when starting subprocess",
+                    "detail": None,
+                },
+                duration_ms=duration,
+                session_id=None,
+                token_usage=None,
+                cost_usd=None,
             )
         except subprocess.TimeoutExpired:
             duration = int((time.monotonic() - start) * 1000)
             return ParticipantTurnResult(
                 content="", raw_output="", status="unknown",
                 status_summary=None, artifacts=[],
-                error=f"timeout after {self._timeout}s", duration_ms=duration,
+                error={
+                    "code": "timeout",
+                    "message": f"timeout after {self._timeout}s",
+                    "detail": None,
+                },
+                duration_ms=duration,
+                session_id=None,
+                token_usage=None,
+                cost_usd=None,
             )
 
     def interrupt(self, session_id: str | None) -> bool:
@@ -65,16 +109,37 @@ class ClaudePlugin:
         pass
 
     def _build_prompt(self, ctx: RoundContext) -> str:
-        parts = [f"[系统] 你正在和其他 AI 讨论以下话题：{ctx['topic']}"]
+        parts = [
+            ctx.get("system_contract", ""),
+            "THIS IS THE TOPIC TO ANSWER NOW. Do not say you are ready or ask for the topic.",
+            f"[TOPIC]\n{ctx['topic']}",
+        ]
         if ctx["history_summary"]:
-            parts.append(f"[历史摘要] {ctx['history_summary']}")
+            parts.append(f"[HISTORY SUMMARY]\n{ctx['history_summary']}")
         for turn in ctx["recent_turns"]:
-            parts.append(f"[{turn.get('sender', '?')}] {turn.get('content', '')}")
+            parts.append(f"[{turn.get('participant_id', '?')}] {turn.get('content', '')}")
         for ui in ctx["user_inputs"]:
-            parts.append(f"[用户/主持人] {ui}")
-        parts.append(f"[当前] {ctx['turn_instruction']}")
-        parts.append("请在回复末尾用以下格式附上状态：")
-        parts.append("<<<ROUNDTABLE_STATUS>>>")
-        parts.append('{"status": "converging|diverging|stalemate", "summary": "当前共识/分歧点"}')
-        parts.append("<<<END_STATUS>>>")
+            parts.append(f"[USER/MODERATOR] {ui}")
+        parts.append(f"[CURRENT INSTRUCTION]\n{ctx['turn_instruction']}")
+        parts.append("Answer the topic now, then append the required ROUNDTABLE_STATUS block.")
         return "\n".join(parts)
+
+
+def _detect_protocol_violation(content: str) -> dict | None:
+    lowered = content.lower()
+    ready_phrases = [
+        "send me the topic",
+        "send the topic",
+        "what's the topic",
+        "what is the topic",
+        "ready to participate",
+        "i'm ready",
+        "i am ready",
+    ]
+    if any(phrase in lowered for phrase in ready_phrases):
+        return {
+            "code": "protocol_violation",
+            "message": "participant did not answer the topic",
+            "detail": None,
+        }
+    return None

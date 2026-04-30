@@ -1,13 +1,17 @@
 from __future__ import annotations
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from src.models import EventRecord
 
 SCHEMA_VERSION = 1
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 class EventLog:
     def __init__(self, base_dir: str, session_id: str):
+        if not SESSION_ID_PATTERN.fullmatch(session_id):
+            raise ValueError("Invalid session_id for event log path")
         self._path = Path(base_dir) / f"{session_id}.jsonl"
         self._path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -1,8 +1,16 @@
 participants:
   - id: claude
     plugin: claude
+    command: claude
+    args: ["--print"]
   - id: codex
     plugin: codex
+    command: codex
+    subcommand: exec
+    args: []
+
+moderator:
+  name: MickWang
 
 settings:
   max_rounds: 12
@@ -12,3 +20,7 @@ settings:
   call_timeout: 120
   renderer: terminal
   output_mode: report
+
+summary:
+  strategy: heuristic
+  participant_id: null
