@@ -1,5 +1,8 @@
 # AI Roundtable
 
+[![CI](https://github.com/wwb1942/ai-roundtable/actions/workflows/ci.yml/badge.svg)](https://github.com/wwb1942/ai-roundtable/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 AI Roundtable is a local multi-agent discussion tool. It can place Claude,
 Codex, and other configured participants into one tmux session, exchange
 visible messages through a shared MCP room store, and let a broker coordinate
@@ -95,3 +98,7 @@ The room broker supports these commands:
   official endpoint or a reliable proxy when that happens.
 - Terminal fallback can only recover visible, stable final output from an agent
   pane. The preferred path is still MCP `room_post`.
+
+## License
+
+MIT - see [LICENSE](LICENSE) for the full text.

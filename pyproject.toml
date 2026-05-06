@@ -1,0 +1,53 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# Conservative starter set: pycodestyle errors, pyflakes, import sort
+select = ["E", "F", "I", "W"]
+# Ignore rules that are commonly noisy in early-stage Python projects
+ignore = [
+    "E402",  # scripts adjust sys.path before local imports
+    "E501",  # line-too-long handled by formatter, not lint
+    "I001",  # existing import layout is left untouched for this housekeeping pass
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401"]  # test fixtures sometimes import for side-effects
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+ignore_missing_imports = true
+# Lenient first-pass: surface obvious errors but do not require strict typing
+check_untyped_defs = false
+disallow_untyped_defs = false
+warn_return_any = false
+warn_unused_ignores = true
+# Modules that intentionally use Any-typed Protocol-driven plugins:
+# the orchestrator's Any pattern is documented in the architecture spec
+
+[[tool.mypy.overrides]]
+module = "src.orchestrator"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "src.plugins.*"
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.coverage.run]
+source = ["src", "scripts"]
+omit = [
+    "tests/*",
+    "*/.venv/*",
+]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 1
