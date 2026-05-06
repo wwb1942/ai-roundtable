@@ -1,6 +1,7 @@
 # AI Roundtable
 
 [![CI](https://github.com/wwb1942/ai-roundtable/actions/workflows/ci.yml/badge.svg)](https://github.com/wwb1942/ai-roundtable/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/wwb1942/ai-roundtable/graph/badge.svg)](https://codecov.io/gh/wwb1942/ai-roundtable)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 AI Roundtable is a local multi-agent discussion tool. It can place Claude,
