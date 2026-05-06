@@ -1,16 +1,24 @@
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 from scripts import start_interactive_tmux
 from scripts.start_interactive_tmux import build_windows_agent_command
 from scripts.start_interactive_tmux import windows_path_to_wsl
 
 
+windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific path conversion")
+
+
+@windows_only
 def test_windows_path_to_wsl_path():
     assert windows_path_to_wsl(Path("D:/projects/ai-roundtable-codex")) == "/mnt/d/projects/ai-roundtable-codex"
 
 
+@windows_only
 def test_build_room_command_forces_utf8_environment():
     command = start_interactive_tmux.build_room_command(
         project_root=Path("D:/projects/ai-roundtable-codex"),
@@ -24,6 +32,7 @@ def test_build_room_command_forces_utf8_environment():
     assert "LC_ALL=C.UTF-8" in command
 
 
+@windows_only
 def test_build_windows_agent_command_runs_from_project_directory():
     command = build_windows_agent_command(Path("D:/projects/ai-roundtable-codex"), "codex")
 
@@ -111,6 +120,7 @@ def test_prepare_mcp_configs_does_not_fail_when_codex_config_is_locked(tmp_path)
     assert any("Could not update Codex MCP config" in warning for warning in warnings)
 
 
+@windows_only
 def test_main_passes_project_directory_to_tmux_renderer(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -166,6 +176,7 @@ moderator:
     assert commands["codex"].endswith("; codex --dangerously-bypass-approvals-and-sandbox\"")
 
 
+@windows_only
 def test_main_loads_participants_and_builds_unknown_agent_commands(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -230,6 +241,7 @@ participants:
     assert renderer.start_kwargs["participant_commands"]["gemini"].endswith("; gemini\"")
 
 
+@windows_only
 def test_main_passes_configured_moderator_name_to_tmux_renderer(tmp_path):
     config = tmp_path / "config.yaml"
     config.write_text(
