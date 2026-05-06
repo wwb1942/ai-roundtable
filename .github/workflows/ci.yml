@@ -7,7 +7,7 @@ on:
     branches: [master, main]
 
 jobs:
-  test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -22,13 +22,34 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff mypy pytest coverage
+          pip install ruff mypy
 
       - name: Lint (ruff)
         run: ruff check src/ scripts/ tests/
 
       - name: Type check (mypy)
         run: mypy
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest coverage
 
       - name: Run tests with coverage
         run: |
@@ -39,7 +60,7 @@ jobs:
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v5
         with:
-          name: coverage-report
+          name: coverage-report-${{ matrix.os }}
           path: coverage.xml
           if-no-files-found: error
 
@@ -51,4 +72,5 @@ jobs:
         with:
           token: ${{ env.CODECOV_TOKEN }}
           files: coverage.xml
+          flags: ${{ matrix.os }}
           fail_ci_if_error: false
