@@ -7,7 +7,7 @@ The tmux panes are now only the visual shell. Shared roundtable messages should 
 From the project root:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\room_mcp_server.py --room-file D:\projects\ai-roundtable-codex\logs\mcp-room-ai-roundtable.jsonl
+.\.venv\Scripts\python.exe scripts\room_mcp_server.py --room-file .\logs\mcp-room-ai-roundtable.jsonl
 ```
 
 The launcher prints the exact command for the active session.
@@ -22,6 +22,8 @@ The launcher prints the exact command for the active session.
 
 Each agent should read the room with `room_read` and publish only its final visible answer with `room_post`.
 The room pane displays `room_post` messages. It does not scrape thinking logs from the agent panes.
+Participant posts must use `role=assistant` and include the `session_id`, `request_id`, and
+`reply_to` values supplied in the prompt.
 
 The broker sends only ASCII text into tmux participant panes. The real user message is stored in the UTF-8 room file and referenced by event id. If `room_read` fails, the prompt includes an ASCII UTF-8 base64 fallback copy of the same message.
 

@@ -1,5 +1,5 @@
 import pytest
-from src.status_detector import extract_content_without_status_blocks, parse_status_block, heuristic_detect
+from src.status_detector import extract_content_without_status_blocks, parse_status_block, heuristic_detect, heuristic_detect_many
 
 def test_parse_valid_status_block():
     text = '''Here is my analysis...
@@ -16,6 +16,16 @@ def test_parse_missing_block():
 
 def test_parse_malformed_json():
     text = '<<<ROUNDTABLE_STATUS>>>\n{bad json}\n<<<END_STATUS>>>'
+    assert parse_status_block(text) is None
+
+
+def test_parse_rejects_unknown_status_value():
+    text = '<<<ROUNDTABLE_STATUS>>>\n{"status": "maybe", "summary": "?"}\n<<<END_STATUS>>>'
+    assert parse_status_block(text) is None
+
+
+def test_parse_rejects_non_string_summary():
+    text = '<<<ROUNDTABLE_STATUS>>>\n{"status": "converging", "summary": 3}\n<<<END_STATUS>>>'
     assert parse_status_block(text) is None
 
 def test_ignores_json_outside_markers():
@@ -67,3 +77,11 @@ def test_heuristic_converging():
     b_response = "Agreed, a phased migration makes the most sense."
     result = heuristic_detect(None, None, a_response, b_response)
     assert result in ("converging", "unknown")
+
+
+def test_heuristic_many_uses_all_participants():
+    result = heuristic_detect_many(
+        [None, None, None],
+        ["We should use a phased migration.", "Agreed, phased migration.", "Phased migration is best."],
+    )
+    assert result == "converging"

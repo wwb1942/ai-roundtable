@@ -28,6 +28,21 @@ def test_older_turns_become_summary():
     assert "[Roundtable Summary]" in ctx["history_summary"]
     assert "Topic: topic" in ctx["history_summary"]
 
+
+def test_context_window_keeps_all_participants_in_recent_rounds():
+    cm = ContextManager(window_size=2)
+    for participant in ("claude", "codex"):
+        cm.add_turn({"round_number": 1, "participant_id": participant, "content": f"r1-{participant}"})
+    for participant in ("claude", "codex"):
+        cm.add_turn({"round_number": 2, "participant_id": participant, "content": f"r2-{participant}"})
+    for participant in ("claude", "codex"):
+        cm.add_turn({"round_number": 3, "participant_id": participant, "content": f"r3-{participant}"})
+
+    ctx = cm.build_context("topic", "continue", speaker_id="claude", round_number=4)
+
+    assert [turn["round_number"] for turn in ctx["recent_turns"]] == [2, 2, 3, 3]
+    assert "r1-claude" in ctx["history_summary"]
+
 def test_user_inputs_injected():
     cm = ContextManager(window_size=3)
     cm.add_user_input("我们团队只有3个人")
@@ -48,3 +63,27 @@ def test_round_number_increments():
     cm.add_turn({"round_number": 1, "participant_id": "a", "content": "x"})
     ctx2 = cm.build_context("t", "go", speaker_id="codex")
     assert ctx2["round_number"] == 2
+
+
+def test_explicit_round_number_is_shared_without_advancing_per_speaker():
+    cm = ContextManager(window_size=3)
+    first = cm.build_context("t", "go", speaker_id="claude", round_number=4)
+    second = cm.build_context("t", "go", speaker_id="codex", round_number=4)
+
+    assert first["round_number"] == 4
+    assert second["round_number"] == 4
+
+
+def test_for_speaker_isolates_nested_snapshot_data():
+    cm = ContextManager(window_size=3)
+    cm.add_turn({"round_number": 1, "participant_id": "a", "content": "original"})
+    cm.add_user_input("constraint")
+    snapshot = cm.build_context("t", "go", speaker_id="", round_number=2)
+
+    first = cm.for_speaker(snapshot, "claude")
+    second = cm.for_speaker(snapshot, "codex")
+    first["recent_turns"][0]["content"] = "mutated"
+    first["user_inputs"].append("leaked")
+
+    assert second["recent_turns"][0]["content"] == "original"
+    assert second["user_inputs"] == ["constraint"]

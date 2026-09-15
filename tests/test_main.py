@@ -4,8 +4,10 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import main as main_module
-from main import _build_plugin, _handle_waiting, _handle_waiting_for_degraded, _make_progress_handler
+from main import ConfigError, _build_plugin, _handle_waiting, _handle_waiting_for_degraded, _make_progress_handler
+from main import validate_config
 from src.models import SessionState
 from src.report import generate_report
 
@@ -44,6 +46,56 @@ def test_build_plugin_passes_command_subcommand_and_args():
         "subcommand": "run",
         "args": ["--flag"],
     }
+
+
+def test_build_plugin_applies_configured_alias_identity():
+    class FakePlugin:
+        id = "claude"
+        display_name = "Claude"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    plugin = _build_plugin(FakePlugin, {"id": "gemini", "plugin": "claude"}, {})
+
+    assert plugin.id == "gemini"
+    assert plugin.display_name == "Gemini"
+
+
+def test_validate_config_rejects_unknown_plugin_and_duplicate_ids():
+    registry = {"fake": object}
+    with pytest.raises(ConfigError, match="unknown"):
+        validate_config(
+            {"participants": [{"id": "a", "plugin": "missing"}, {"id": "b", "plugin": "fake"}]},
+            registry,
+        )
+    with pytest.raises(ConfigError, match="duplicate"):
+        validate_config(
+            {"participants": [{"id": "a", "plugin": "fake"}, {"id": "A", "plugin": "fake"}]},
+            registry,
+        )
+
+
+def test_validate_config_rejects_invalid_limits():
+    with pytest.raises(ConfigError, match="max_rounds"):
+        validate_config(
+            {
+                "participants": [{"id": "a", "plugin": "fake"}, {"id": "b", "plugin": "fake"}],
+                "settings": {"max_rounds": 0},
+            },
+            {"fake": object},
+        )
+
+
+def test_validate_config_rejects_falsy_non_mapping_settings():
+    with pytest.raises(ConfigError, match="settings"):
+        validate_config(
+            {
+                "participants": [{"id": "a", "plugin": "fake"}, {"id": "b", "plugin": "fake"}],
+                "settings": False,
+            },
+            {"fake": object},
+        )
 
 
 def test_progress_handler_writes_to_tmux_renderer():

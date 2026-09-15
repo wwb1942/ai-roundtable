@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
+import tempfile
 from pathlib import Path
 
 from src.mention import parse_mentions
@@ -15,8 +18,18 @@ from src.report import generate_report
 
 
 PLUGIN_REGISTRY = {"claude": ClaudePlugin, "codex": CodexPlugin}
-END_COMMANDS = {"end", "exit", "quit", "结束", "退出"}
-CONTINUE_COMMANDS = {"", "continue", "继续"}
+PARTICIPANT_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+SESSION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+class ConfigError(RuntimeError):
+    """Raised when the YAML configuration cannot safely be used."""
+
+
+# Keep command matching independent of source-file encoding artifacts in old
+# generated configs.
+END_COMMANDS = {"end", "exit", "quit", "\u7ed3\u675f", "\u9000\u51fa"}
+CONTINUE_COMMANDS = {"", "continue", "\u7ee7\u7eed"}
 
 
 def load_config(path: str) -> dict:
@@ -25,8 +38,89 @@ def load_config(path: str) -> dict:
     except ModuleNotFoundError as exc:
         raise RuntimeError("Missing dependency: PyYAML. Install with `python -m pip install -r requirements.txt`.") from exc
 
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+    except OSError as exc:
+        raise ConfigError(f"Could not read config {path}: {exc}") from exc
+    except Exception as exc:
+        raise ConfigError(f"Could not parse config {path}: {exc}") from exc
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise ConfigError("Configuration root must be a YAML mapping")
+    return config
+
+
+def validate_config(config: dict, plugin_registry: dict | None = None) -> dict:
+    """Validate and normalize user configuration before creating any panes."""
+    registry = PLUGIN_REGISTRY if plugin_registry is None else plugin_registry
+    participants = config.get("participants")
+    if not isinstance(participants, list) or len(participants) < 2:
+        raise ConfigError("participants must contain at least two entries")
+
+    seen: set[str] = set()
+    for index, participant in enumerate(participants):
+        prefix = f"participants[{index}]"
+        if not isinstance(participant, dict):
+            raise ConfigError(f"{prefix} must be a mapping")
+        participant_id = participant.get("id")
+        if not isinstance(participant_id, str) or not PARTICIPANT_ID_PATTERN.fullmatch(participant_id):
+            raise ConfigError(f"{prefix}.id must match {PARTICIPANT_ID_PATTERN.pattern}")
+        normalized_id = participant_id.lower()
+        if normalized_id in seen:
+            raise ConfigError(f"duplicate participant id: {participant_id}")
+        seen.add(normalized_id)
+        plugin_id = participant.get("plugin")
+        if not isinstance(plugin_id, str) or plugin_id not in registry:
+            supported = ", ".join(sorted(registry)) or "(none)"
+            raise ConfigError(f"{prefix}.plugin {plugin_id!r} is unknown; supported: {supported}")
+        if "args" in participant and (
+            not isinstance(participant["args"], list)
+            or not all(isinstance(arg, str) for arg in participant["args"])
+        ):
+            raise ConfigError(f"{prefix}.args must be a list of strings")
+        for key in ("command", "subcommand"):
+            if key in participant and not isinstance(participant[key], str):
+                raise ConfigError(f"{prefix}.{key} must be a string")
+
+    settings = config.get("settings", {})
+    if settings is None:
+        settings = {}
+    if not isinstance(settings, dict):
+        raise ConfigError("settings must be a mapping")
+    bounds = {
+        "max_rounds": (1, 1000),
+        "convergence_threshold": (1, 100),
+        "stalemate_threshold": (1, 100),
+        "context_window": (1, 100),
+        "call_timeout": (1, 86_400),
+        "retry_count": (0, 10),
+    }
+    for key, (minimum, maximum) in bounds.items():
+        if key not in settings:
+            continue
+        value = settings[key]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ConfigError(f"settings.{key} must be an integer in [{minimum}, {maximum}]")
+    return config
+
+
+def _write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def _build_plugin(plugin_cls, p_conf: dict, settings: dict):
@@ -34,7 +128,16 @@ def _build_plugin(plugin_cls, p_conf: dict, settings: dict):
     for key in ("command", "subcommand", "args"):
         if key in p_conf:
             kwargs[key] = p_conf[key]
-    return plugin_cls(**kwargs)
+    plugin = plugin_cls(**kwargs)
+    if "id" in p_conf:
+        configured_id = str(p_conf["id"]).lower()
+        plugin.id = configured_id
+        configured_name = p_conf.get("display_name") or p_conf.get("name")
+        if configured_name:
+            plugin.display_name = str(configured_name)
+        elif configured_id not in {"claude", "codex"}:
+            plugin.display_name = configured_id.title()
+    return plugin
 
 
 def main():
@@ -43,28 +146,39 @@ def main():
     parser.add_argument("--config", default="config.yaml", help="Config file path")
     parser.add_argument("--max-rounds", type=int, help="Override max rounds")
     parser.add_argument("--manual", action="store_true", help="Manual moderation mode")
-    parser.add_argument("--renderer", choices=["terminal", "tmux"], default="terminal")
+    parser.add_argument("--renderer", choices=["terminal", "tmux"], default=None)
     parser.add_argument("--output-dir", default="output", help="Report output directory")
     parser.add_argument("--tmux-session", default="ai-roundtable", help="tmux session name")
     parser.add_argument("--no-attach", action="store_true", help="Do not attach to tmux after creating panes")
     args = parser.parse_args()
 
-    config = load_config(args.config)
-    settings = config.get("settings", {})
-    if args.max_rounds:
-        settings["max_rounds"] = args.max_rounds
+    if not SESSION_NAME_PATTERN.fullmatch(args.tmux_session):
+        parser.error("--tmux-session must contain only letters, numbers, '.', '_' or '-'")
+
+    try:
+        config = validate_config(load_config(args.config))
+        settings = dict(config.get("settings") or {})
+        if args.max_rounds is not None:
+            if args.max_rounds < 1 or args.max_rounds > 1000:
+                raise ConfigError("--max-rounds must be an integer in [1, 1000]")
+            settings["max_rounds"] = args.max_rounds
+        renderer_name = args.renderer or settings.get("renderer", "terminal")
+        if renderer_name not in {"terminal", "tmux"}:
+            raise ConfigError("settings.renderer must be 'terminal' or 'tmux'")
+    except (ConfigError, RuntimeError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
     plugins = []
     participant_ids = []
-    for p_conf in config.get("participants", []):
+    for p_conf in config["participants"]:
         participant_ids.append(p_conf["id"])
-        plugin_cls = PLUGIN_REGISTRY.get(p_conf["plugin"])
-        if plugin_cls:
-            plugins.append(_build_plugin(plugin_cls, p_conf, settings))
+        plugin_cls = PLUGIN_REGISTRY[p_conf["plugin"]]
+        plugins.append(_build_plugin(plugin_cls, p_conf, settings))
 
     terminal_renderer = TerminalRenderer()
     tmux_renderer = None
-    if args.renderer == "tmux":
+    if renderer_name == "tmux":
         tmux_renderer = TmuxRenderer(session_name=args.tmux_session, participants=participant_ids)
         tmux_renderer.start(args.topic, [p.display_name for p in plugins])
         terminal_renderer.render_header(args.topic, [p.display_name for p in plugins])
@@ -92,6 +206,11 @@ def main():
         orch.start()
         if args.manual:
             _run_manual(orch, terminal_renderer)
+            if orch.state == SessionState.WAITING_FOR_USER:
+                wait_result = _handle_waiting(orch, terminal_renderer)
+                if wait_result == "deferred":
+                    print("Session deferred without final report.")
+                    return
         else:
             orch.run_auto()
             if orch.state == SessionState.WAITING_FOR_USER:
@@ -100,6 +219,13 @@ def main():
                     print("Session deferred without final report.")
                     return
     except RuntimeError as e:
+        if tmux_renderer:
+            stop_renderer = getattr(tmux_renderer, "stop", None)
+            if callable(stop_renderer):
+                try:
+                    stop_renderer()
+                except Exception:
+                    pass
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -112,8 +238,8 @@ def main():
     terminal_renderer.render_report(md_report)
     if tmux_renderer:
         tmux_renderer.write_room(md_report)
-    (output_dir / "report.md").write_text(md_report, encoding="utf-8")
-    (output_dir / "report.json").write_text(json_report, encoding="utf-8")
+    _write_text_atomic(output_dir / "report.md", md_report)
+    _write_text_atomic(output_dir / "report.json", json_report)
     print(f"\nReports saved to {output_dir}/")
 
     if tmux_renderer and not args.no_attach:
@@ -124,11 +250,12 @@ def _handle_waiting(orch: Orchestrator, renderer: TerminalRenderer) -> str | Non
     while orch.state == SessionState.WAITING_FOR_USER:
         if orch.end_reason == "degraded":
             return _handle_waiting_for_degraded(orch, renderer)
-        renderer.render_status("stalemate - awaiting input", orch.round_count, 0)
+        renderer.render_status("stalemate - awaiting input", orch.round_count, getattr(orch, "max_rounds", 0))
         try:
             user_input = input("\n[Stalemate] Enter your input (or 'end' to finish): ").strip()
         except (EOFError, KeyboardInterrupt):
-            break
+            orch.finalize_user_ended()
+            return "finalized"
         if user_input.lower() in END_COMMANDS:
             orch.finalize_user_ended()
             return "finalized"
@@ -141,7 +268,7 @@ def _handle_waiting(orch: Orchestrator, renderer: TerminalRenderer) -> str | Non
 
 def _handle_waiting_for_degraded(orch: Orchestrator, renderer: TerminalRenderer) -> str:
     while orch.state == SessionState.WAITING_FOR_USER and orch.end_reason == "degraded":
-        renderer.render_status("degraded - awaiting user decision", orch.round_count, 0)
+        renderer.render_status("degraded - awaiting user decision", orch.round_count, getattr(orch, "max_rounds", 0))
         try:
             user_input = input(
                 "\n[Degraded] Choose: end = finalize report, manual = staged report, wait = keep session open: "
@@ -207,9 +334,11 @@ def _run_manual(orch: Orchestrator, renderer: TerminalRenderer) -> None:
         try:
             user_input = input("\n[Moderator] Command (enter/continue/@name/end): ").strip()
         except (EOFError, KeyboardInterrupt):
-            break
+            orch.finalize_user_ended()
+            return
         if user_input.lower() in END_COMMANDS:
-            break
+            orch.finalize_user_ended()
+            return
         if user_input.lower() in CONTINUE_COMMANDS:
             continue
         mentions = parse_mentions(user_input, known)

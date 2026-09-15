@@ -3,7 +3,8 @@ param(
   [string]$Session = "ai-roundtable",
   [string]$ClaudeCommand = "",
   [string]$CodexCommand = "",
-  [string]$RoomFile = ""
+  [string]$RoomFile = "",
+  [switch]$AllowUnsafeCodex
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,10 +17,19 @@ chcp 65001 | Out-Null
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$PythonHealthy = $false
+if (Test-Path $Python) {
+  try {
+    & $Python -c "import sys; print(sys.version_info[:2])" *> $null
+    $PythonHealthy = ($LASTEXITCODE -eq 0)
+  } catch {
+    $PythonHealthy = $false
+  }
+}
 
-if (-not (Test-Path $Python)) {
+if (-not $PythonHealthy) {
   Write-Host "[setup] Creating local virtualenv..."
-  python -m venv (Join-Path $ProjectRoot ".venv")
+  python -m venv --clear (Join-Path $ProjectRoot ".venv")
 }
 
 Write-Host "[setup] Installing Python dependencies..."
@@ -62,6 +72,7 @@ $pyArgs = @(
 )
 if ($ClaudeCommand) { $pyArgs += @("--claude-command", $ClaudeCommand) }
 if ($CodexCommand) { $pyArgs += @("--codex-command", $CodexCommand) }
+if ($AllowUnsafeCodex) { $pyArgs += "--allow-unsafe-codex" }
 & $Python @pyArgs
 
 $McpCommand = "$Python scripts\room_mcp_server.py --room-file `"$RoomFile`""

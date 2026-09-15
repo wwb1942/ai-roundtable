@@ -16,6 +16,17 @@ def test_build_server_config_points_to_room_server(tmp_path):
     assert config["env"] == {"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
 
 
+def test_build_server_config_can_bind_session_and_author(tmp_path):
+    config = build_server_config(
+        tmp_path / "python.exe",
+        tmp_path / "room.jsonl",
+        session_id="session-1",
+        author="codex",
+    )
+
+    assert config["args"][1:5] == ["--session", "session-1", "--author", "codex"]
+
+
 def test_write_claude_mcp_json(tmp_path):
     path = tmp_path / ".mcp.json"
     server = {"command": "python", "args": ["server.py"]}
@@ -77,3 +88,17 @@ def test_install_codex_config_replaces_existing_managed_block(tmp_path):
     assert "model = 'gpt-5'" in content
     assert "new" in content
     assert "old" not in content
+
+
+def test_install_codex_config_replaces_windows_paths_literally(tmp_path):
+    config_path = tmp_path / "config.toml"
+    snippet_path = tmp_path / "snippet.toml"
+    config_path.write_text(
+        "# >>> ai-roundtable-room mcp >>>\nold\n# <<< ai-roundtable-room mcp <<<\n",
+        encoding="utf-8",
+    )
+    snippet_path.write_text("command = 'C:\\Users\\agent\\python.exe'\n", encoding="utf-8")
+
+    generate_mcp_config.install_codex_config(config_path, snippet_path)
+
+    assert "C:\\Users\\agent\\python.exe" in config_path.read_text(encoding="utf-8")

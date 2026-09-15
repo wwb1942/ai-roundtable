@@ -63,6 +63,8 @@ class RoundContext(TypedDict):
 
 class EventRecord(TypedDict):
     schema_version: int
+    id: NotRequired[str]
+    session_id: NotRequired[str]
     type: str
     timestamp: str
     data: dict

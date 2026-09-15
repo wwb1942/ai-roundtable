@@ -103,7 +103,8 @@ def test_start_interactive_runs_real_agent_clis_in_panes():
     renderer.start_interactive(participant_commands={"claude": "claude", "codex": "codex"})
 
     assert calls[1] == ["tmux", "new-session", "-d", "-s", "test-room", "-n", "room"]
-    assert ["tmux", "send-keys", "-t", "test-room:0.0", "python scripts/room_broker.py --session test-room", "Enter"] in calls
+    assert ["tmux", "send-keys", "-t", "test-room:0.0", "-l", "python scripts/room_broker.py --session test-room"] in calls
+    assert ["tmux", "send-keys", "-t", "test-room:0.0", "Enter"] in calls
     assert ["tmux", "split-window", "-h", "-p", "50", "-t", "test-room:0", "claude"] in calls
     assert ["tmux", "split-window", "-v", "-p", "50", "-t", "test-room:0.1", "codex"] in calls
 
@@ -213,4 +214,5 @@ def test_send_prompt_to_agent_pane():
 
     renderer.send_prompt("claude", "@codex give your view")
 
-    assert ["tmux", "send-keys", "-t", "test-room:0.1", "@codex give your view", "Enter"] in calls
+    assert ["tmux", "send-keys", "-t", "test-room:0.1", "-l", "@codex give your view"] in calls
+    assert ["tmux", "send-keys", "-t", "test-room:0.1", "Enter"] in calls

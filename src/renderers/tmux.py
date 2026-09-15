@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import re
 from collections.abc import Callable, Sequence
 
 
 Runner = Callable[[list[str]], object]
+SESSION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+PARTICIPANT_ID_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 
 
 class TmuxRenderer:
@@ -19,8 +22,15 @@ class TmuxRenderer:
         tmux_cmd: Sequence[str] | None = None,
         runner: Runner | None = None,
     ) -> None:
+        if not SESSION_NAME_PATTERN.fullmatch(session_name):
+            raise ValueError("session_name contains unsupported characters")
+        participant_values = [str(pid) for pid in participants]
+        if any(not PARTICIPANT_ID_PATTERN.fullmatch(pid) for pid in participant_values):
+            raise ValueError("participant ids contain unsupported characters")
+        if len({pid.lower() for pid in participant_values}) != len(participant_values):
+            raise ValueError("participant ids must be unique")
         self.session_name = session_name
-        self._participants = [pid.lower() for pid in participants]
+        self._participants = [pid.lower() for pid in participant_values]
         self._moderator_name = moderator_name
         self._tmux_cmd = list(tmux_cmd or self._detect_tmux_command())
         self._runner = runner or self._run
@@ -65,13 +75,18 @@ class TmuxRenderer:
         self.write_room(f"you: {self._moderator_name}")
         self.write_room(f"# {topic_text}  (participants: {', '.join(self._participants)})")
         command = room_command or f"python scripts/room_broker.py --session {self.session_name}"
-        self._call(["send-keys", "-t", self._panes["room"], command, "Enter"])
+        self._call(["send-keys", "-t", self._panes["room"], "-l", _safe_tmux_text(command)])
+        self._call(["send-keys", "-t", self._panes["room"], "Enter"])
 
     def attach_command(self) -> list[str]:
         return [*self._tmux_cmd, "attach-session", "-t", self.session_name]
 
     def attach(self) -> None:
         self._call(["attach-session", "-t", self.session_name])
+
+    def stop(self) -> None:
+        """Remove a session created by this renderer after startup failure."""
+        self._call(["kill-session", "-t", self.session_name], allow_failure=True)
 
     def write_room(self, text: str) -> None:
         self._write(self._panes["room"], text)
@@ -84,10 +99,13 @@ class TmuxRenderer:
         pane = self._panes.get(participant_id.lower())
         if not pane:
             raise ValueError(f"Unknown participant pane: {participant_id}")
-        self._call(["send-keys", "-t", pane, prompt, "Enter"])
+        # Literal mode prevents tmux key names/control sequences in model
+        # output from being interpreted as interactive commands.
+        self._call(["send-keys", "-t", pane, "-l", _safe_tmux_text(prompt)])
+        self._call(["send-keys", "-t", pane, "Enter"])
 
     def _write(self, pane: str, text: str) -> None:
-        for line in text.splitlines() or [""]:
+        for line in (_safe_tmux_text(text)).splitlines() or [""]:
             self._call(["send-keys", "-t", pane, f"printf '%s\\n' {self._shell_quote(line)}", "Enter"])
 
     def _call(self, args: list[str], allow_failure: bool = False) -> None:
@@ -126,3 +144,8 @@ class TmuxRenderer:
     @staticmethod
     def _shell_quote(value: str) -> str:
         return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _safe_tmux_text(value: str) -> str:
+    """Remove terminal control bytes before writing model text into a pane."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b\r]", "", value)

@@ -10,9 +10,11 @@ from scripts.room_broker import format_room_state
 from scripts.room_broker import parse_debate_command
 from scripts.room_broker import parse_sync_command
 from scripts.room_broker import parse_targets
+from scripts.room_broker import load_participant_ids
 from scripts.room_broker import RoomBroker
 from scripts.room_broker import run_debate
 from scripts.room_broker import wait_for_room_replies
+import pytest
 
 
 def test_parse_single_target():
@@ -48,6 +50,23 @@ def test_parse_all_target():
 
     assert targets == ["claude", "codex"]
     assert message == "discuss this"
+
+
+def test_parse_targets_rejects_prefix_collisions():
+    assert parse_targets("@claudex review") == ([], "@claudex review")
+    assert parse_targets("@alloy review") == ([], "@alloy review")
+
+
+def test_load_participant_ids_handles_non_mapping_yaml_root(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text("- claude\n- codex\n", encoding="utf-8")
+
+    assert load_participant_ids(config) == ["claude", "codex"]
+
+
+def test_room_broker_rejects_path_traversal_session(tmp_path):
+    with pytest.raises(ValueError, match="session"):
+        RoomBroker("..\\..\\outside", targets=["claude"], room_file=tmp_path / "room.jsonl")
 
 
 def test_should_auto_debate_never_triggers_implicitly():
@@ -152,6 +171,12 @@ def test_parse_sync_command_with_target_and_lines():
     parsed = parse_sync_command("/sync @codex 120")
 
     assert parsed == (["codex"], 120)
+
+
+def test_parse_sync_command_caps_capture_lines():
+    parsed = parse_sync_command("/sync @codex 999999")
+
+    assert parsed == (["codex"], room_broker_module.MAX_SYNC_LINES)
 
 
 def test_parse_sync_command_all_can_use_dynamic_targets():
@@ -396,6 +421,27 @@ def test_send_many_writes_user_message_to_room_store(tmp_path):
     assert broker.room_events_after()[0]["content"] == "hello"
 
 
+def test_send_many_assigns_request_correlation_metadata(tmp_path):
+    broker = RoomBroker(
+        session="test-room",
+        targets=["claude"],
+        log_path=tmp_path / "broker.jsonl",
+        room_file=tmp_path / "room.jsonl",
+        runner=lambda cmd: None,
+        sleeper=lambda seconds: None,
+        logger=lambda data: None,
+    )
+
+    event = broker.send_many(["claude"], "hello")
+
+    assert event["session_id"] == "test-room"
+    assert event["request_id"]
+    prompt = broker.last_prompt_for("claude")
+    assert prompt is not None
+    assert f"Room request id: {event['request_id']}" in prompt
+    assert "Room session id: test-room" in prompt
+
+
 def test_format_room_state_summarizes_current_room(tmp_path):
     broker = RoomBroker(
         session="test-room",
@@ -556,6 +602,35 @@ def test_wait_for_room_replies_matches_author_case_insensitively(tmp_path):
 
     assert any("--- codex reply ---" in line for line in printed)
     assert any("final answer" in line for line in printed)
+
+
+def test_wait_for_room_replies_ignores_same_author_reply_for_another_request(tmp_path):
+    printed = []
+    broker = RoomBroker(
+        session="test-room",
+        targets=["claude"],
+        log_path=tmp_path / "broker.jsonl",
+        room_file=tmp_path / "room.jsonl",
+        runner=lambda cmd: None,
+        sleeper=lambda seconds: None,
+        logger=lambda data: None,
+    )
+    request = broker.send_many(["claude"], "topic")
+    broker.room_store.post("claude", "stale", reply_to="old-request", session_id="test-room")
+    broker.room_store.post("claude", "current", reply_to=request["request_id"], session_id="test-room")
+
+    wait_for_room_replies(
+        broker,
+        after_id=request["id"],
+        targets=["claude"],
+        interval=0.1,
+        max_seconds=1,
+        printer=lambda text: printed.append(text),
+        sleeper=lambda seconds: None,
+    )
+
+    assert any("current" in line for line in printed)
+    assert not any("stale" in line for line in printed)
 
 
 def test_extract_room_replies_from_marked_terminal_fallback():

@@ -72,3 +72,49 @@ def test_json_structure():
         "plan_ready_reason",
     ]:
         assert key in data
+
+
+def test_report_uses_status_summaries_for_open_items():
+    _, js = generate_report(
+        topic="migration",
+        participants=["A", "B"],
+        end_reason="max_rounds",
+        turns=[
+            {"sender": "A", "content": "wait", "status": "stalemate", "status_summary": "Choose a deadline"},
+            {"sender": "B", "content": "split", "status": "diverging", "status_summary": "Different rollout"},
+        ],
+    )
+
+    data = json.loads(js)
+    assert data["open_questions"] == ["Choose a deadline"]
+    assert data["disagreements"] == ["Different rollout"]
+    assert data["plan_ready"] is False
+
+
+def test_report_normalizes_missing_end_reason_and_escapes_html():
+    md, js = generate_report(
+        topic="<script>alert(1)</script>",
+        participants=["A"],
+        end_reason=None,
+        turns=[{"sender": "A", "content": "<b>unsafe</b>"}],
+    )
+
+    assert "<script>" not in md
+    assert "<b>" not in md
+    data = json.loads(js)
+    assert data["end_reason"] == "aborted"
+    assert "<script>" in data["topic"]
+
+
+def test_degraded_report_uses_last_nonempty_surviving_turn():
+    _, js = generate_report(
+        topic="test",
+        participants=["A", "B"],
+        end_reason="degraded",
+        turns=[
+            {"sender": "A", "content": "usable assessment", "status": "diverging"},
+            {"sender": "B", "content": "", "status": "unknown", "error": {"message": "timeout"}},
+        ],
+    )
+
+    assert "usable assessment" in json.loads(js)["final_conclusion"]

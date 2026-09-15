@@ -7,16 +7,43 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 
 
-def build_server_config(python: Path, room_file: Path) -> dict:
+def _toml_string(value: str) -> str:
+    """Encode a TOML string without allowing quotes/newlines to escape it."""
+    if "'" not in value and "\r" not in value and "\n" not in value:
+        return "'" + value + "'"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _powershell_literal(value: str) -> str:
+    """Return a single-quoted PowerShell literal."""
+    if "\r" in value or "\n" in value:
+        raise ValueError("PowerShell path cannot contain newlines")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def build_server_config(
+    python: Path,
+    room_file: Path,
+    *,
+    session_id: str | None = None,
+    author: str | None = None,
+) -> dict:
+    args = [str(PROJECT_ROOT / "scripts" / "room_mcp_server.py")]
+    if session_id:
+        if not SESSION_PATTERN.fullmatch(session_id):
+            raise ValueError("session_id must contain only letters, numbers, '.', '_' or '-'")
+        args.extend(["--session", session_id])
+    if author:
+        if not re.fullmatch(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$", author):
+            raise ValueError("author must be an ASCII participant id")
+        args.extend(["--author", author])
+    args.extend(["--room-file", str(room_file)])
     return {
         "command": str(python),
-        "args": [
-            str(PROJECT_ROOT / "scripts" / "room_mcp_server.py"),
-            "--room-file",
-            str(room_file),
-        ],
+        "args": args,
         "env": {
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": "utf-8",
@@ -32,11 +59,11 @@ def write_claude_mcp_json(path: Path, server_config: dict) -> None:
 
 
 def write_codex_snippet(path: Path, server_config: dict) -> None:
-    args = ", ".join("'" + arg.replace("\\", "\\\\").replace("'", "\\'") + "'" for arg in server_config["args"])
+    args = ", ".join(_toml_string(str(arg)) for arg in server_config["args"])
     content = (
         "[mcp_servers.ai-roundtable-room]\n"
         'type = "stdio"\n'
-        f"command = '{server_config['command'].replace("\\", "\\\\").replace("'", "\\'")}'\n"
+        f"command = {_toml_string(str(server_config['command']))}\n"
         f"args = [{args}]\n"
         "\n"
         "[mcp_servers.ai-roundtable-room.env]\n"
@@ -47,9 +74,10 @@ def write_codex_snippet(path: Path, server_config: dict) -> None:
 
 
 def write_codex_install_script(path: Path, snippet_path: Path) -> None:
+    quoted_snippet_path = _powershell_literal(str(snippet_path.resolve()))
     content = f"""$ErrorActionPreference = "Stop"
 $ConfigPath = Join-Path $env:USERPROFILE ".codex\\config.toml"
-$SnippetPath = "{snippet_path}"
+$SnippetPath = {quoted_snippet_path}
 $Start = "# >>> ai-roundtable-room mcp >>>"
 $End = "# <<< ai-roundtable-room mcp <<<"
 
@@ -83,7 +111,9 @@ def install_codex_config(config_path: Path, snippet_path: Path) -> None:
     block = f"{start}\n{snippet.rstrip()}\n{end}"
     pattern = re.escape(start) + r"[\s\S]*?" + re.escape(end)
     if re.search(pattern, config):
-        config = re.sub(pattern, block, config)
+        # Use a callable replacement so backslashes in Windows paths are
+        # treated as literal text rather than replacement escapes (e.g. ``\U``).
+        config = re.sub(pattern, lambda _match: block, config)
     else:
         config = config.rstrip() + "\n\n" + block + "\n"
     config_path.write_text(config, encoding="utf-8")
@@ -102,10 +132,11 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    server_config = build_server_config(python, room_file)
-    write_claude_mcp_json(PROJECT_ROOT / ".mcp.json", server_config)
+    claude_server_config = build_server_config(python, room_file, session_id=args.session, author="claude")
+    codex_server_config = build_server_config(python, room_file, session_id=args.session, author="codex")
+    write_claude_mcp_json(PROJECT_ROOT / ".mcp.json", claude_server_config)
     codex_snippet = out_dir / "codex-ai-roundtable-room.toml"
-    write_codex_snippet(codex_snippet, server_config)
+    write_codex_snippet(codex_snippet, codex_server_config)
     write_codex_install_script(out_dir / "install-codex-mcp.ps1", codex_snippet)
     if args.install_codex:
         install_codex_config(Path.home() / ".codex" / "config.toml", codex_snippet)

@@ -11,21 +11,27 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.room_store import MAX_READ_LIMIT
 from src.room_store import RoomStore
+from src.room_store import UnknownCursorError
+from src.room_store import jsonl_file_lock
 
 
 DEFAULT_KNOWN_TARGETS = ["claude", "codex"]  # fallback when no broker targets passed
+SESSION_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 Runner = Callable[[list[str]], object]
 CaptureRunner = Callable[[list[str]], Any]
 DEFAULT_CONTINUATION_MESSAGE = "请阅读上文，针对上一条发言给出你的分析：哪些点你认同，哪些点你有不同看法，并补充新的视角。"
 DEFAULT_DEBATE_ROUNDS = 3
 MAX_DEBATE_ROUNDS = 10
+MAX_SYNC_LINES = 1000
 USAGE_LINE = (
     "Usage: @claude message | @codex message | @all message | "
     "/debate [rounds] topic | /state | /sync [@claude|@codex|@all] [lines] | "
@@ -54,9 +60,12 @@ def load_participant_ids(config_path: Path) -> list[str]:
         return list(DEFAULT_KNOWN_TARGETS)
     try:
         with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
-    except OSError:
+            loaded = yaml.safe_load(f) or {}
+    except (OSError, TypeError, ValueError):
         return list(DEFAULT_KNOWN_TARGETS)
+    if not isinstance(loaded, dict):
+        return list(DEFAULT_KNOWN_TARGETS)
+    config: dict[str, Any] = loaded
     participant_ids = [
         str(participant["id"]).lower()
         for participant in config.get("participants", [])
@@ -145,14 +154,22 @@ def _strip_target_separators(text: str) -> str:
 
 def parse_targets(text: str, known_targets: list[str] | None = None) -> tuple[list[str], str]:
     text = normalize_input_text(text)
-    known = [target.lower() for target in (known_targets or DEFAULT_KNOWN_TARGETS)]
+    known = list(dict.fromkeys(target.lower() for target in (known_targets or DEFAULT_KNOWN_TARGETS)))
+    # Longest-first prevents a short id from claiming a longer one (for example
+    # ``@all`` must not consume the prefix of ``@alloy``).
+    candidates = sorted([*known, "all"], key=len, reverse=True)
     targets: list[str] = []
     remaining = text.strip()
     while remaining.startswith("@"):
-        mention = remaining[1:].lower()
+        mention = remaining[1:]
         matched: str | None = None
-        for target in [*known, "all"]:
-            if mention.startswith(target):
+        # Participant ids are ASCII command tokens. Reading only that token
+        # preserves the existing ``@codex继续`` shorthand while rejecting
+        # prefix collisions such as ``@claudex`` and ``@alloy``.
+        token_match = re.match(r"[A-Za-z0-9_-]+", mention)
+        token = token_match.group(0).lower() if token_match else ""
+        for target in candidates:
+            if token == target:
                 matched = target
                 break
         if matched is None:
@@ -181,14 +198,29 @@ def should_auto_debate(
     return False
 
 
-def format_agent_prompt(message: str, event_id: str | None = None) -> str:
+def format_agent_prompt(
+    message: str,
+    event_id: str | None = None,
+    request_id: str | None = None,
+    session_id: str | None = None,
+    target: str | None = None,
+) -> str:
     event_line = f"Target room event id: {event_id}\n" if event_id else ""
+    request_line = f"Room request id: {request_id}\n" if request_id else ""
+    reply_line = f"Reply correlation id (use as reply_to): {request_id}\n" if request_id else ""
+    session_line = f"Room session id: {session_id}\n" if session_id else ""
+    target_line = f"Your room author id: {target}\n" if target else ""
     fallback_message = base64.b64encode(message.encode("utf-8")).decode("ascii")
     return (
         "Read the shared roundtable room via the MCP tool room_read. "
         f"{event_line}"
+        f"{request_line}"
+        f"{reply_line}"
+        f"{session_line}"
+        f"{target_line}"
         f"If room_read fails, decode this UTF-8 base64 fallback room message: {fallback_message}\n"
         "Answer the target user message from the room, then post only your final visible reply with room_post. "
+        "When calling room_post, include the exact request_id and reply_to values shown above, plus the session_id and your author id. "
         "Do not use shell commands, Python scripts, PowerShell, or direct file writes to post to the room. "
         "If the MCP room_post tool is unavailable or fails, print exactly this ASCII fallback format and nothing else after it. "
         "The payload must be your final visible reply encoded as UTF-8 base64:\n"
@@ -206,6 +238,11 @@ def snapshots_changed(previous: dict[str, str], current: dict[str, str]) -> dict
     return {target: output for target, output in current.items() if previous.get(target) != output}
 
 
+def safe_terminal_text(value: object) -> str:
+    """Remove terminal control bytes from user and participant output."""
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x1b\r]", "", str(value or ""))
+
+
 def format_room_state(broker: "RoomBroker") -> str:
     state = broker.room_store.state()
     participants = ", ".join(state["participants"]) if state["participants"] else "(none)"
@@ -219,13 +256,14 @@ def format_room_state(broker: "RoomBroker") -> str:
 
 
 def format_room_tail(broker: "RoomBroker", limit: int = 10) -> str:
-    events = broker.room_store.read(limit=limit)
+    safe_limit = min(max(int(limit), 1), MAX_READ_LIMIT)
+    events = broker.room_store.read(limit=safe_limit)
     if not events:
         return "[tail] no room messages"
     lines = [f"[tail] last {len(events)} room messages"]
     for event in events:
-        author = event.get("author") or "?"
-        content = str(event.get("content") or "").replace("\n", " ")
+        author = safe_terminal_text(event.get("author") or "?")
+        content = safe_terminal_text(event.get("content") or "").replace("\n", " ")
         lines.append(f"{author}: {content}")
     return "\n".join(lines)
 
@@ -342,6 +380,10 @@ def extract_visible_terminal_reply(output: str) -> str:
     skip_prefixes = (
         "Read the shared roundtable room",
         "Target room event id:",
+        "Room request id:",
+        "Reply correlation id:",
+        "Room session id:",
+        "Your room author id:",
         "If room_read fails,",
         "Answer the target user message",
         "Do not use shell commands,",
@@ -400,13 +442,15 @@ class RoomBroker:
         verbose: bool = False,
         printer: Callable[[str], None] = print,
     ) -> None:
+        if not SESSION_PATTERN.fullmatch(session):
+            raise ValueError("session must contain only letters, numbers, '.', '_' or '-'")
         self.session = session
         self.verbose = verbose
         self._targets = [target.lower() for target in targets]
         self.panes = {target: f"{session}:0.{index + 1}" for index, target in enumerate(self._targets)}
         self.log_path = log_path or Path("logs") / f"room-{session}.jsonl"
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self.room_store = RoomStore(room_file or Path("logs") / f"mcp-room-{session}.jsonl")
+        self.room_store = RoomStore(room_file or Path("logs") / f"mcp-room-{session}.jsonl", session_id=session)
         self._runner = runner or self._run
         self._capture_runner = capture_runner or self._capture
         self._sleeper = sleeper or time.sleep
@@ -415,6 +459,8 @@ class RoomBroker:
         self._fallback_baselines: dict[str, str] = {}
         self._pending_visible_replies: dict[str, str] = {}
         self._last_prompt_by_target: dict[str, str] = {}
+        self._request_id_by_event_id: dict[str, str] = {}
+        self._session_marker_id: str | None = self._find_session_marker()
 
     @property
     def targets(self) -> list[str]:
@@ -432,47 +478,130 @@ class RoomBroker:
         self._printer(text)
 
     def _say_chat(self, author: str, content: str) -> None:
-        for line in content.splitlines() or [""]:
-            self._printer(f"{author}> {line}")
+        safe_author = safe_terminal_text(author)
+        for line in safe_terminal_text(content).splitlines() or [""]:
+            self._printer(f"{safe_author}> {line}")
 
     def last_prompt_for(self, target: str) -> str | None:
         return self._last_prompt_by_target.get(target.lower())
 
     def post_session_marker(self) -> dict:
-        return self.room_store.post(
+        marker = self.room_store.post(
             "system",
             f"broker session started: {self.session}",
             role="system",
+            session_id=self.session,
         )
+        self._session_marker_id = marker["id"]
+        return marker
 
-    def send(self, target: str, message: str, event_id: str | None = None) -> None:
-        pane = self.panes[target]
-        prompt = format_agent_prompt(message, event_id=event_id)
-        self._last_prompt_by_target[target.lower()] = prompt
+    def _find_session_marker(self) -> str | None:
+        try:
+            events = self.room_store.read(limit=MAX_READ_LIMIT)
+        except (OSError, ValueError):
+            return None
+        for event in reversed(events):
+            if (
+                event.get("author") == "system"
+                and event.get("role") == "system"
+                and event.get("session_id") in (None, self.session)
+                and str(event.get("content") or "") == f"broker session started: {self.session}"
+            ):
+                marker_id = event.get("id")
+                if isinstance(marker_id, str):
+                    return marker_id
+        return None
+
+    def send(
+        self,
+        target: str,
+        message: str,
+        event_id: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        target_key = target.lower()
+        pane = self.panes.get(target_key)
+        if pane is None:
+            raise ValueError(f"Unknown participant target: {target}")
+        resolved_request_id = request_id or event_id
+        prompt = format_agent_prompt(
+            message,
+            event_id=event_id,
+            request_id=resolved_request_id,
+            session_id=self.session,
+            target=target_key,
+        )
+        self._last_prompt_by_target[target_key] = prompt
         self._runner(["tmux", "select-pane", "-t", pane])
         self._runner(["tmux", "send-keys", "-t", pane, "-l", prompt])
         self._sleeper(0.35)
         self._runner(["tmux", "send-keys", "-t", pane, "C-m"])
-        self._logger({"type": "message_sent", "target": target, "message": message})
+        self._logger(
+            {
+                "type": "message_sent",
+                "target": target_key,
+                "message": message,
+                "request_id": resolved_request_id,
+                "session_id": self.session,
+            }
+        )
 
     def send_many(self, targets: list[str], message: str) -> dict:
+        normalized_targets = list(dict.fromkeys(target.lower() for target in targets))
+        unknown = [target for target in normalized_targets if target not in self.panes]
+        if unknown:
+            raise ValueError(f"Unknown participant target(s): {', '.join(unknown)}")
         self._capture_fallback_baselines(targets)
-        event = self.room_store.post("user", message, role="user")
-        for target in targets:
-            self.send(target, message, event_id=event["id"])
+        request_id = str(uuid4())
+        event = self.room_store.post("user", message, role="user", request_id=request_id, session_id=self.session)
+        self._request_id_by_event_id[event["id"]] = request_id
+        for target in normalized_targets:
+            self.send(target, message, event_id=event["id"], request_id=request_id)
         return event
 
     def room_events_after(self, after_id: str | None = None) -> list[dict]:
-        return self.room_store.read(after_id=after_id, limit=100)
+        try:
+            return self.room_store.read(after_id=after_id, limit=100, session_id=self.session)
+        except UnknownCursorError:
+            # A rotated/truncated log must not silently jump to its tail. If a
+            # session marker exists, explicitly resume after that marker and log
+            # the recovery so callers can surface it in diagnostics.
+            if self._session_marker_id and after_id != self._session_marker_id:
+                self._logger(
+                    {
+                        "type": "room_cursor_reset",
+                        "from_cursor": after_id,
+                        "to_cursor": self._session_marker_id,
+                        "session_id": self.session,
+                    }
+                )
+                return self.room_store.read(after_id=self._session_marker_id, limit=100, session_id=self.session)
+            raise
+
+    def request_id_for_event(self, event_id: str | None) -> str | None:
+        if event_id is None:
+            return None
+        request_id = self._request_id_by_event_id.get(event_id)
+        if request_id:
+            return request_id
+        event = self.room_store.find(event_id)
+        if event:
+            value = event.get("request_id")
+            return value if isinstance(value, str) else None
+        return None
 
     def sync(self, targets: list[str] | None = None, lines: int = 80) -> dict[str, str]:
-        selected_targets = targets or self.targets
+        selected_targets = [target.lower() for target in (targets or self.targets)]
+        unknown = [target for target in selected_targets if target not in self.panes]
+        if unknown:
+            raise ValueError(f"Unknown participant target(s): {', '.join(unknown)}")
+        safe_lines = min(max(int(lines), 1), MAX_SYNC_LINES)
         output: dict[str, str] = {}
         for target in selected_targets:
             pane = self.panes[target]
-            captured = self._capture_runner(["tmux", "capture-pane", "-p", "-t", pane, "-S", f"-{lines}"])
+            captured = self._capture_runner(["tmux", "capture-pane", "-p", "-t", pane, "-S", f"-{safe_lines}"])
             output[target] = self._extract_stdout(captured)
-            self._logger({"type": "pane_synced", "target": target, "lines": lines})
+            self._logger({"type": "pane_synced", "target": target, "lines": safe_lines})
         return output
 
     def poll_changes(
@@ -539,9 +668,10 @@ class RoomBroker:
         return str(getattr(result, "stdout", ""))
 
     def _capture_fallback_baselines(self, targets: list[str]) -> None:
+        normalized_targets = [target.lower() for target in targets]
         try:
-            self._fallback_baselines = self.sync(targets, lines=200)
-            for target in targets:
+            self._fallback_baselines = self.sync(normalized_targets, lines=200)
+            for target in normalized_targets:
                 self._pending_visible_replies.pop(target, None)
         except Exception as exc:
             self._fallback_baselines = {}
@@ -550,8 +680,10 @@ class RoomBroker:
 
     def _log(self, data: dict) -> None:
         record = {"timestamp": datetime.now(timezone.utc).isoformat(), **data}
-        with open(self.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with jsonl_file_lock(self.log_path):
+            with open(self.log_path, "a", encoding="utf-8", newline="") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                f.flush()
 
 
 def parse_sync_command(text: str, known_targets: list[str] | None = None) -> tuple[list[str], int] | None:
@@ -570,7 +702,9 @@ def parse_sync_command(text: str, known_targets: list[str] | None = None) -> tup
                 targets.append(target)
             continue
         if part.isdigit():
-            lines = int(part)
+            value = int(part)
+            if value > 0:
+                lines = min(value, MAX_SYNC_LINES)
     return targets or list(known), lines
 
 
@@ -668,6 +802,7 @@ def wait_for_room_replies(
     reply_printer: Callable[[str, str], None] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    request_id: str | None = None,
 ) -> str | None:
     status_out = status_printer or printer or print
     error_out = error_printer or printer or print
@@ -675,20 +810,56 @@ def wait_for_room_replies(
     expected = {target.lower() for target in targets}
     seen: set[str] = set()
     last_id = after_id
+    correlation_id = request_id or broker.request_id_for_event(after_id)
     start = clock()
     deadline = start + max_seconds if max_seconds is not None else None
     next_heartbeat = start + heartbeat_seconds
     try:
         while seen != expected and (deadline is None or clock() < deadline):
-            sleeper(interval)
+            if deadline is not None:
+                remaining = deadline - clock()
+                if remaining <= 0:
+                    break
+                sleeper(min(interval, remaining))
+            else:
+                sleeper(interval)
             now = clock()
-            events = broker.room_events_after(last_id)
+            if deadline is not None and now >= deadline:
+                break
+            try:
+                events = broker.room_events_after(last_id)
+            except UnknownCursorError as exc:
+                error_out(f"\n[cursor] cannot resume room events: {exc}")
+                return last_id
             for event in events:
-                last_id = event["id"]
+                event_id = event.get("id")
+                if not isinstance(event_id, str) or not event_id:
+                    error_out("\n[room] ignored event without a valid id")
+                    continue
+                last_id = event_id
                 author = str(event.get("author") or "")
                 author_key = author.lower()
-                if event.get("role") == "user" or author_key not in expected or author_key in seen:
+                if (
+                    event.get("type") not in (None, "message")
+                    or event.get("role") in ("user", "system")
+                    or author_key not in expected
+                    or author_key in seen
+                ):
                     continue
+                if correlation_id:
+                    reply_to = event.get("reply_to")
+                    event_request_id = event.get("request_id")
+                    accepted_correlations = {correlation_id}
+                    if after_id:
+                        # Older prompts exposed only the room event id. Accept
+                        # that id as a compatibility alias while preferring the
+                        # explicit request id for new clients.
+                        accepted_correlations.add(after_id)
+                    if reply_to not in accepted_correlations and event_request_id not in accepted_correlations:
+                        continue
+                    event_session = event.get("session_id")
+                    if event_session is not None and event_session != broker.session:
+                        continue
                 seen.add(author_key)
                 status_out(f"\n--- {author_key} reply ---")
                 chat_out(author_key, event.get("content", ""))
@@ -699,7 +870,13 @@ def wait_for_room_replies(
                 if target in seen:
                     continue
                 seen.add(target)
-                posted = broker.room_store.post(target, content)
+                posted = broker.room_store.post(
+                    target,
+                    content,
+                    session_id=broker.session,
+                    request_id=correlation_id,
+                    reply_to=correlation_id,
+                )
                 last_id = posted["id"]
                 status_out(f"\n--- {target} terminal fallback ---")
                 chat_out(target, content)

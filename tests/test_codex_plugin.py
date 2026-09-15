@@ -72,6 +72,20 @@ def test_send_turn_file_not_found_returns_structured_error():
         assert result["status"] == "unknown"
         assert result["error"]["code"] == "command_not_found"
 
+
+def test_send_turn_os_error_returns_structured_error():
+    plugin = CodexPlugin(command="codex")
+    ctx = RoundContext(
+        round_number=1, topic="test", history_summary="",
+        recent_turns=[], user_inputs=[], turn_instruction="Share your view.",
+        system_contract="", speaker_id="codex", mentioned_by_user=False,
+    )
+    with patch("subprocess.run", side_effect=PermissionError("denied")):
+        result = plugin.send_turn(None, ctx)
+
+    assert result["error"]["code"] == "unknown"
+    assert "failed to run codex" in result["error"]["message"]
+
 def test_build_prompt_tells_model_to_answer_topic_now():
     plugin = CodexPlugin()
     ctx = RoundContext(

@@ -47,3 +47,21 @@ def test_file_persists(log_dir):
 def test_rejects_path_traversal_session_id(log_dir):
     with pytest.raises(ValueError):
         EventLog(log_dir, "../escape")
+
+
+def test_events_include_session_identity_and_id(log_dir):
+    log = EventLog(log_dir, "session-1")
+    event = log.append("message", {"content": "hello"})
+
+    assert event["id"]
+    assert event["session_id"] == "session-1"
+
+
+def test_malformed_event_line_does_not_break_replay(log_dir):
+    log = EventLog(log_dir, "session-1")
+    log.append("first", {})
+    with open(log.path, "a", encoding="utf-8") as handle:
+        handle.write("{not-json}\n")
+    log.append("last", {})
+
+    assert [event["type"] for event in log.read_all()] == ["first", "last"]

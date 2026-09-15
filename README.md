@@ -49,6 +49,12 @@ The launcher creates `.venv`, installs dependencies, generates MCP config,
 starts a WSL tmux session, opens the room pane on the left, and opens agent CLI
 panes on the right.
 
+The interactive launcher keeps Codex's approval and sandbox protections enabled
+by default. Passing `--allow-unsafe-codex` explicitly disables those protections
+and should only be used in an isolated, trusted workspace. Custom participant
+IDs must provide an explicit `command` in `config.yaml`; unknown IDs are not
+treated as executable names automatically.
+
 ## Configuration
 
 The main configuration file is `config.yaml`:
@@ -70,6 +76,13 @@ The main configuration file is `config.yaml`:
 - `summary.strategy`: report summary strategy.
 - `summary.participant_id`: optional participant selected for summary.
 
+Configuration is validated before tmux panes or participant sessions are
+created. Participant IDs must be unique, plugin names must be registered, and
+numeric settings are bounded to prevent accidental runaway sessions.
+When a non-default participant alias is configured, the launcher leaves the
+MCP author field flexible so that the alias can identify itself; keep such
+rooms on a trusted local machine.
+
 ## Commands
 
 The room broker supports these commands:
@@ -86,6 +99,11 @@ The room broker supports these commands:
 - `/tail [N]`: show the last N room messages.
 - `/sync [@target|@all] [lines]`: capture recent agent pane output for fallback debugging.
 - `/quit`: exit the broker.
+
+Room events include session and request correlation IDs. Participant replies
+must reference the request they answer, which prevents delayed replies from a
+previous prompt being accepted as the current turn. Room reads are bounded and
+malformed trailing JSONL records are skipped with a warning.
 
 ## Known Limitations
 
