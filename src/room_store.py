@@ -8,6 +8,7 @@ from collections import deque
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 
@@ -72,14 +73,18 @@ def jsonl_file_lock(path: Path):
                 lock_file.write(b"\0")
                 lock_file.flush()
             lock_file.seek(0)
+            # Platform-specific locking modules expose partial, incompatible
+            # stubs across operating systems; keep this boundary explicit.
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                msvcrt_api = cast(Any, msvcrt)
+                msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_LOCK, 1)
             else:
                 import fcntl
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+                fcntl_api = cast(Any, fcntl)
+                fcntl_api.flock(lock_file.fileno(), fcntl_api.LOCK_EX)
             try:
                 yield
             finally:
@@ -87,11 +92,13 @@ def jsonl_file_lock(path: Path):
                     import msvcrt
 
                     lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt_api = cast(Any, msvcrt)
+                    msvcrt_api.locking(lock_file.fileno(), msvcrt_api.LK_UNLCK, 1)
                 else:
                     import fcntl
 
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                    fcntl_api = cast(Any, fcntl)
+                    fcntl_api.flock(lock_file.fileno(), fcntl_api.LOCK_UN)
 
 
 class RoomStore:
