@@ -4,12 +4,21 @@
 [![codecov](https://codecov.io/gh/wwb1942/ai-roundtable/graph/badge.svg)](https://codecov.io/gh/wwb1942/ai-roundtable)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-AI Roundtable is a local multi-agent discussion tool. It can place Claude,
-Codex, and other configured participants into one tmux session, exchange
-visible messages through a shared MCP room store, and let a broker coordinate
-message routing, reply waits, fallbacks, and debate turns.
+AI Roundtable is a local multi-agent deliberation system for interactive
+discussions and isolated repository-maintenance workflows. It coordinates
+Claude, Codex, and other configured CLI agents so they can examine a problem
+from multiple perspectives, work toward a decision, and produce auditable
+artifacts even when they disagree or need human input.
 
-## Architecture
+The project currently provides two workflows:
+
+- **Roundtable Discuss** runs free-form or orchestrated discussions. It can also
+  place participants in a shared tmux session backed by an MCP room.
+- **Roundtable Maintainer** diagnoses a repository task, delegates changes to
+  one executor in an isolated Git worktree, runs deterministic checks, and
+  returns the result to the roundtable for review before human approval.
+
+## Interactive Architecture
 
 ```text
 +-------------------------------------------------------------+
@@ -37,7 +46,7 @@ message routing, reply waits, fallbacks, and debate turns.
 +-------------------------------------------------------------+
 ```
 
-## Quick Start
+## Interactive Room
 
 Run from the project root:
 
@@ -152,6 +161,13 @@ malformed trailing JSONL records are skipped with a warning.
   official endpoint or a reliable proxy when that happens.
 - Terminal fallback can only recover visible, stable final output from an agent
   pane. The preferred path is still MCP `room_post`.
+
+## Acknowledgements
+
+AI coding agents, including OpenAI Codex, have assisted with the design,
+implementation, review, and verification of this project. Commits are recorded
+under the maintainer's Git identity; GitHub derives its Contributors list from
+that commit metadata.
 
 ## License
 
