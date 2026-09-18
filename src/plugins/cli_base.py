@@ -80,6 +80,7 @@ def run_cli_turn(
             errors="replace",
             timeout=timeout,
             check=False,
+            cwd=ctx.get("working_directory"),
         )
         duration = int((time.monotonic() - start) * 1000)
         raw_output = _truncate(getattr(completed, "stdout", "")).strip()

@@ -55,6 +55,41 @@ and should only be used in an isolated, trusted workspace. Custom participant
 IDs must provide an explicit `command` in `config.yaml`; unknown IDs are not
 treated as executable names automatically.
 
+## Batch Workflows
+
+The original free-form roundtable remains available in both forms:
+
+```powershell
+python main.py "Should this service use an event queue?"
+python main.py discuss "Should this service use an event queue?"
+```
+
+Roundtable Maintainer applies the same multi-agent deliberation to a local
+Python Git repository. It creates a separate Git worktree, runs a diagnostic
+roundtable, lets one selected participant implement the change, executes
+deterministic checks, and finishes with a review roundtable:
+
+```powershell
+python main.py maintain `
+  --repo E:\projects\example `
+  --issue "Fix the failing retry test" `
+  --check "python -m pytest"
+```
+
+Use `--issue-file issue.md` for longer issue descriptions and repeat `--check`
+to run more than one command. The default executor is `codex` when configured;
+override it with `--executor PARTICIPANT_ID`. Checks are launched as argument
+arrays without a command shell. If no check is supplied for a detected Python
+project, the workflow runs the current interpreter with `-m pytest`.
+
+The source repository must be clean by default. `--allow-dirty` permits a run,
+but uncommitted source changes are not copied into the isolated worktree. The
+workflow never commits, pushes, opens a pull request, merges, or removes its
+worktree. A successful run ends in `awaiting_approval`; any failed check,
+participant error, unexpected Git-state change, reviewer mutation, or lack of
+review consensus ends in `needs_attention`. See [docs/maintainer.md](docs/maintainer.md)
+for the lifecycle, artifacts, and cleanup commands.
+
 ## Configuration
 
 The main configuration file is `config.yaml`:

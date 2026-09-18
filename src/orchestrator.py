@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from src.models import (
     IllegalStateTransition,
@@ -32,6 +32,9 @@ class Orchestrator:
         log_dir: str = "logs",
         retry_count: int = 1,
         on_event: Any | None = None,
+        system_contract: str | None = None,
+        instruction_factory: Callable[[int, str], str] | None = None,
+        working_directory: str | None = None,
     ) -> None:
         self._topic = topic
         self._plugins: list[Any] = list(plugins)
@@ -40,6 +43,8 @@ class Orchestrator:
         self._stalemate_threshold = stalemate_threshold
         self._max_consecutive_failures = max_consecutive_failures
         self._retry_count = retry_count
+        self._instruction_factory = instruction_factory
+        self._working_directory = working_directory
 
         self._state = SessionState.READY
         self._round_count = 0
@@ -60,7 +65,7 @@ class Orchestrator:
         self._started_sessions: list[tuple[Any, str | None]] = []
 
         self._session_id = str(uuid.uuid4())
-        self._ctx = ContextManager(window_size=context_window)
+        self._ctx = ContextManager(window_size=context_window, system_contract=system_contract)
         self._log = EventLog(base_dir=log_dir, session_id=self._session_id)
         self._on_event = on_event
         if self._max_rounds < 1:
@@ -179,6 +184,20 @@ class Orchestrator:
             self._emit("user_ended_session", {})
             self._finalize()
 
+    def finalize_for_workflow(self, end_reason: str | None = None) -> None:
+        """Close an active session without overwriting its workflow reason.
+
+        Batch workflow callers may need to clean up a waiting or degraded
+        session after automatic execution.  Unlike ``finalize_user_ended``,
+        this method preserves an already-recorded reason and only supplies the
+        provided fallback when the session has not recorded one yet.
+        """
+        if self._state in {SessionState.RUNNING, SessionState.WAITING_FOR_USER, SessionState.DEGRADED}:
+            if self._end_reason is None and end_reason is not None:
+                self._end_reason = end_reason
+            self._emit("workflow_session_cleanup", {"end_reason": self._end_reason})
+            self._finalize()
+
     # --- Round flow ---
 
     def _run_one_round(self) -> None:
@@ -202,6 +221,8 @@ class Orchestrator:
             mentioned_by_user=False,
             round_number=max(1, self._round_count),
         )
+        if self._working_directory is not None:
+            snapshot["working_directory"] = self._working_directory
         self._round_mentions = self._pending_mentions
         self._pending_mentions = set()
         return snapshot
@@ -210,7 +231,10 @@ class Orchestrator:
         """Build a participant view, preserving the historical helper API."""
         if snapshot is None:
             snapshot = self._prepare_round_snapshot()
-        return self._ctx.for_speaker(snapshot, plugin.id, plugin.id.lower() in self._round_mentions)
+        context = self._ctx.for_speaker(snapshot, plugin.id, plugin.id.lower() in self._round_mentions)
+        if self._instruction_factory is not None:
+            context["turn_instruction"] = self._instruction_factory(self._round_count, plugin.id)
+        return context
 
     def _collect_responses(self) -> list[tuple[Any, ParticipantTurnResult]]:
         results: list[tuple[Any, ParticipantTurnResult]] = []
@@ -390,6 +414,7 @@ class Orchestrator:
             self._end_reason = "converged"
             self._finalize()
         elif self._consecutive_stalemate >= self._stalemate_threshold:
+            self._end_reason = "stalemate"
             self._transition_to(SessionState.WAITING_FOR_USER)
             self._emit("waiting_for_user", {"reason": "stalemate"})
 

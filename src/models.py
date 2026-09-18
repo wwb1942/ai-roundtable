@@ -60,6 +60,7 @@ class RoundContext(TypedDict):
     turn_instruction: str
     speaker_id: str
     mentioned_by_user: bool
+    working_directory: NotRequired[str]
 
 class EventRecord(TypedDict):
     schema_version: int

@@ -31,6 +31,21 @@ def test_round_context_has_required_fields():
     assert ctx["system_contract"] == "rules here"
     assert ctx["speaker_id"] == "claude"
 
+def test_round_context_can_include_working_directory():
+    ctx = RoundContext(
+        round_number=1,
+        topic="test topic",
+        system_contract="rules here",
+        history_summary="",
+        recent_turns=[],
+        user_inputs=[],
+        turn_instruction="Inspect the repository.",
+        speaker_id="codex",
+        mentioned_by_user=False,
+        working_directory="C:\\worktree",
+    )
+    assert ctx["working_directory"] == "C:\\worktree"
+
 def test_recent_turn_status_optional():
     turn_with = RecentTurn(round_number=1, participant_id="claude", content="hi", status="converging")
     assert turn_with["status"] == "converging"

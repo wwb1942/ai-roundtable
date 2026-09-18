@@ -55,6 +55,7 @@ def test_stalemate_triggers_waiting():
     orch.start()
     orch.run_auto()
     assert orch.state == SessionState.WAITING_FOR_USER
+    assert orch.end_reason == "stalemate"
 
 def test_degraded_when_plugin_fails():
     p1 = make_fake_plugin("claude", "diverging")
@@ -131,6 +132,40 @@ def test_finalize_user_ended_ignores_non_waiting_session():
     assert orch.state == SessionState.COMPLETED
     p1.close_session.assert_called_once()
     p2.close_session.assert_called_once()
+
+
+def test_finalize_for_workflow_preserves_stalemate_reason():
+    p1 = make_fake_plugin("claude", "stalemate")
+    p2 = make_fake_plugin("codex", "stalemate")
+    orch = Orchestrator(topic="test", plugins=[p1, p2], max_rounds=10, stalemate_threshold=1)
+    orch.start()
+    orch.run_auto()
+
+    assert orch.state == SessionState.WAITING_FOR_USER
+    orch.finalize_for_workflow(end_reason="stalemate")
+
+    assert orch.state == SessionState.COMPLETED
+    assert orch.end_reason == "stalemate"
+
+
+def test_finalize_for_workflow_preserves_degraded_reason():
+    p1 = make_fake_plugin("claude", "diverging")
+    p2 = make_fake_plugin("codex", "diverging")
+    p2.send_turn.return_value = ParticipantTurnResult(
+        content="", raw_output="", status="unknown", status_summary=None,
+        artifacts=[], error={"code": "timeout", "message": "timeout", "detail": None}, duration_ms=0,
+        session_id=None, token_usage=None, cost_usd=None,
+    )
+    orch = Orchestrator(topic="test", plugins=[p1, p2], max_rounds=10, max_consecutive_failures=1)
+    orch.start()
+    orch.run_auto()
+
+    assert orch.state == SessionState.WAITING_FOR_USER
+    assert orch.end_reason == "degraded"
+    orch.finalize_for_workflow(end_reason="fallback")
+
+    assert orch.state == SessionState.COMPLETED
+    assert orch.end_reason == "degraded"
 
 
 def test_plugin_exception_becomes_structured_turn_failure():
@@ -233,6 +268,53 @@ def test_calls_plugin_with_session_and_context():
     first_call_args = p1.send_turn.call_args.args
     assert first_call_args[0] == "session-1"
     assert first_call_args[1]["speaker_id"] == "claude"
+
+
+def test_custom_contract_instruction_factory_and_working_directory_are_propagated():
+    p1 = make_fake_plugin("claude", "diverging")
+    p2 = make_fake_plugin("codex", "diverging")
+    instruction_calls = []
+
+    def instruction_factory(round_number, participant_id):
+        instruction_calls.append((round_number, participant_id))
+        return f"Round {round_number}: inspect as {participant_id}."
+
+    orch = Orchestrator(
+        topic="fix the issue",
+        plugins=[p1, p2],
+        max_rounds=1,
+        system_contract="maintainer contract",
+        instruction_factory=instruction_factory,
+        working_directory="C:\\isolated-worktree",
+    )
+
+    orch.start()
+    orch.run_auto()
+
+    p1.start_session.assert_called_once_with("fix the issue", "maintainer contract")
+    p2.start_session.assert_called_once_with("fix the issue", "maintainer contract")
+    p1_context = p1.send_turn.call_args.args[1]
+    p2_context = p2.send_turn.call_args.args[1]
+    assert p1_context["system_contract"] == "maintainer contract"
+    assert p2_context["system_contract"] == "maintainer contract"
+    assert p1_context["turn_instruction"] == "Round 1: inspect as claude."
+    assert p2_context["turn_instruction"] == "Round 1: inspect as codex."
+    assert p1_context["working_directory"] == "C:\\isolated-worktree"
+    assert p2_context["working_directory"] == "C:\\isolated-worktree"
+    assert instruction_calls == [(1, "claude"), (1, "codex")]
+
+
+def test_default_round_context_omits_working_directory_and_uses_standard_instruction():
+    p1 = make_fake_plugin("claude", "diverging")
+    p2 = make_fake_plugin("codex", "diverging")
+    orch = Orchestrator(topic="test", plugins=[p1, p2], max_rounds=1)
+
+    orch.start()
+    orch.run_auto()
+
+    context = p1.send_turn.call_args.args[1]
+    assert context["turn_instruction"] == "Round 1. Discuss the topic and indicate your convergence status."
+    assert "working_directory" not in context
 
 
 def test_round_context_uses_one_snapshot_and_broadcasts_user_input():

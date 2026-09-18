@@ -32,6 +32,21 @@ def test_send_turn_uses_exec_subcommand():
         assert Path(args[0]).name.lower() in {"codex", "codex.exe", "codex.cmd"}
         assert "exec" in args
 
+def test_send_turn_runs_in_context_working_directory():
+    plugin = CodexPlugin()
+    ctx = RoundContext(
+        round_number=1, topic="test", history_summary="",
+        recent_turns=[], user_inputs=[], turn_instruction="Inspect the repository.",
+        system_contract="", speaker_id="codex", mentioned_by_user=False,
+        working_directory="C:\\isolated-worktree",
+    )
+    fake_output = 'Analysis...\n<<<ROUNDTABLE_STATUS>>>\n{"status":"diverging","summary":"test"}\n<<<END_STATUS>>>'
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout=fake_output, returncode=0)
+        plugin.send_turn(None, ctx)
+
+    assert mock_run.call_args.kwargs["cwd"] == "C:\\isolated-worktree"
+
 def test_send_turn_uses_configured_subcommand_and_args():
     plugin = CodexPlugin(command="codex-custom", subcommand="exec", args=["--sandbox", "workspace-write"])
     ctx = RoundContext(

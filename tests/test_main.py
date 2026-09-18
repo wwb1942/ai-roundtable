@@ -2,11 +2,21 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import main as main_module
-from main import ConfigError, _build_plugin, _handle_waiting, _handle_waiting_for_degraded, _make_progress_handler
+from main import (
+    ConfigError,
+    _build_plugin,
+    _cli_exit_code,
+    _handle_waiting,
+    _handle_waiting_for_degraded,
+    _make_progress_handler,
+    _normalize_argv,
+    _split_check_command,
+)
 from main import validate_config
 from src.models import SessionState
 from src.report import generate_report
@@ -27,6 +37,90 @@ def test_help_does_not_require_runtime_config_dependencies():
 
     assert result.returncode == 0
     assert "AI Roundtable Discussion" in result.stdout
+
+
+def test_maintain_help_does_not_load_runtime_config():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "main.py"), "maintain", "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=tmp,
+        )
+
+    assert result.returncode == 0
+    assert "--repo" in result.stdout
+    assert "--issue-file" in result.stdout
+
+
+def test_legacy_topic_is_normalized_to_discuss_subcommand():
+    assert _normalize_argv(["legacy topic", "--manual"]) == ["discuss", "legacy topic", "--manual"]
+    assert _normalize_argv(["discuss", "topic"]) == ["discuss", "topic"]
+    assert _normalize_argv(["maintain", "--help"]) == ["maintain", "--help"]
+
+
+def test_check_command_is_split_without_a_shell():
+    assert _split_check_command("python -m pytest") == ["python", "-m", "pytest"]
+
+
+def test_maintainer_cli_exit_code_reflects_approval_gate():
+    assert _cli_exit_code(SimpleNamespace(state=SimpleNamespace(value="awaiting_approval"))) == 0
+    assert _cli_exit_code(SimpleNamespace(state=SimpleNamespace(value="needs_attention"))) == 1
+    assert _cli_exit_code(SimpleNamespace(state=SimpleNamespace(value="failed"))) == 1
+    assert _cli_exit_code(None) == 0
+
+
+def test_maintain_cli_builds_plugins_and_dispatches_workflow(tmp_path, capsys):
+    class FakePlugin:
+        id = "fake"
+        display_name = "Fake"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    result = SimpleNamespace(
+        state=SimpleNamespace(value="awaiting_approval"),
+        worktree=tmp_path / "run" / "workspace",
+        report_path=tmp_path / "run" / "report.md",
+        reasons=[],
+    )
+    config = {
+        "participants": [
+            {"id": "first", "plugin": "fake"},
+            {"id": "second", "plugin": "fake"},
+        ],
+        "settings": {"retry_count": 0, "context_window": 2},
+    }
+
+    with (
+        patch.object(main_module, "load_config", return_value=config),
+        patch.object(main_module, "PLUGIN_REGISTRY", {"fake": FakePlugin}),
+        patch("src.maintainer.MaintainerWorkflow") as workflow_cls,
+    ):
+        workflow_cls.return_value.run.return_value = result
+        returned = main_module.main(
+            [
+                "maintain",
+                "--repo",
+                str(tmp_path / "source"),
+                "--issue",
+                "Fix it",
+                "--check",
+                "python -m pytest",
+                "--output-dir",
+                str(tmp_path / "run"),
+            ]
+        )
+
+    assert returned is result
+    kwargs = workflow_cls.call_args.kwargs
+    assert kwargs["issue"] == "Fix it"
+    assert kwargs["checks"] == [["python", "-m", "pytest"]]
+    assert [plugin.id for plugin in kwargs["plugins"]] == ["first", "second"]
+    assert kwargs["retry_count"] == 0
+    assert kwargs["context_window"] == 2
+    assert "Maintainer state: awaiting_approval" in capsys.readouterr().out
 
 
 def test_build_plugin_passes_command_subcommand_and_args():

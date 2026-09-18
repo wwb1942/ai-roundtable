@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import sys
 import tempfile
 from pathlib import Path
@@ -140,8 +141,7 @@ def _build_plugin(plugin_cls, p_conf: dict, settings: dict):
     return plugin
 
 
-def main():
-    parser = argparse.ArgumentParser(description="AI Roundtable Discussion")
+def _add_discussion_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("topic", help="Discussion topic")
     parser.add_argument("--config", default="config.yaml", help="Config file path")
     parser.add_argument("--max-rounds", type=int, help="Override max rounds")
@@ -150,7 +150,70 @@ def main():
     parser.add_argument("--output-dir", default="output", help="Report output directory")
     parser.add_argument("--tmux-session", default="ai-roundtable", help="tmux session name")
     parser.add_argument("--no-attach", action="store_true", help="Do not attach to tmux after creating panes")
-    args = parser.parse_args()
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="AI Roundtable Discussion and Maintainer Workflows")
+    subparsers = parser.add_subparsers(dest="command")
+
+    discuss_parser = subparsers.add_parser("discuss", help="Run a free-form roundtable discussion")
+    _add_discussion_arguments(discuss_parser)
+
+    maintain_parser = subparsers.add_parser("maintain", help="Investigate and patch a local Git repository")
+    maintain_parser.add_argument("--repo", required=True, help="Path to the local Git repository")
+    issue_group = maintain_parser.add_mutually_exclusive_group(required=True)
+    issue_group.add_argument("--issue", help="Issue description")
+    issue_group.add_argument("--issue-file", help="UTF-8 file containing the issue description")
+    maintain_parser.add_argument("--config", default="config.yaml", help="Participant config file path")
+    maintain_parser.add_argument("--base-ref", default="HEAD", help="Git revision to use as the worktree base")
+    maintain_parser.add_argument("--executor", help="Participant ID selected to implement the patch")
+    maintain_parser.add_argument("--rounds", type=int, default=2, help="Rounds for each decision gate (default: 2)")
+    maintain_parser.add_argument(
+        "--check",
+        action="append",
+        default=None,
+        metavar="COMMAND",
+        help="Verification command; quote it as one argument and repeat for multiple checks",
+    )
+    maintain_parser.add_argument("--check-timeout", type=int, default=300, help="Timeout per check in seconds")
+    maintain_parser.add_argument("--output-dir", help="Run directory; defaults beside the target repository")
+    maintain_parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="Allow a dirty source repository (uncommitted changes are not copied to the worktree)",
+    )
+    return parser
+
+
+def _normalize_argv(argv: list[str]) -> list[str]:
+    """Preserve the original ``main.py TOPIC`` interface."""
+    if not argv or argv[0] in {"discuss", "maintain", "-h", "--help"}:
+        return argv
+    return ["discuss", *argv]
+
+
+def _create_plugins(config: dict, settings: dict) -> tuple[list, list[str]]:
+    plugins = []
+    participant_ids = []
+    for p_conf in config["participants"]:
+        participant_ids.append(p_conf["id"])
+        plugin_cls = PLUGIN_REGISTRY[p_conf["plugin"]]
+        plugins.append(_build_plugin(plugin_cls, p_conf, settings))
+    return plugins, participant_ids
+
+
+def main(argv: list[str] | None = None):
+    parser = _build_parser()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_normalize_argv(raw_argv))
+    if args.command == "maintain":
+        return _run_maintainer(args, parser)
+    if args.command != "discuss":
+        parser.error("choose a command or provide a discussion topic")
+    return _run_discussion(args, parser)
+
+
+def _run_discussion(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
 
     if not SESSION_NAME_PATTERN.fullmatch(args.tmux_session):
         parser.error("--tmux-session must contain only letters, numbers, '.', '_' or '-'")
@@ -169,12 +232,7 @@ def main():
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    plugins = []
-    participant_ids = []
-    for p_conf in config["participants"]:
-        participant_ids.append(p_conf["id"])
-        plugin_cls = PLUGIN_REGISTRY[p_conf["plugin"]]
-        plugins.append(_build_plugin(plugin_cls, p_conf, settings))
+    plugins, participant_ids = _create_plugins(config, settings)
 
     terminal_renderer = TerminalRenderer()
     tmux_renderer = None
@@ -244,6 +302,77 @@ def main():
 
     if tmux_renderer and not args.no_attach:
         tmux_renderer.attach()
+
+
+def _run_maintainer(args: argparse.Namespace, parser: argparse.ArgumentParser) -> object:
+    if not 1 <= args.rounds <= 20:
+        parser.error("--rounds must be an integer in [1, 20]")
+    if args.check_timeout < 1:
+        parser.error("--check-timeout must be positive")
+
+    try:
+        issue = args.issue
+        if args.issue_file:
+            issue = Path(args.issue_file).read_text(encoding="utf-8")
+        if not issue or not issue.strip():
+            parser.error("the issue description must not be empty")
+
+        config = validate_config(load_config(args.config))
+        settings = dict(config.get("settings") or {})
+        plugins, _ = _create_plugins(config, settings)
+        checks = [_split_check_command(value) for value in args.check] if args.check else None
+
+        from src.maintainer import MaintainerWorkflow
+
+        workflow = MaintainerWorkflow(
+            repo=args.repo,
+            issue=issue.strip(),
+            plugins=plugins,
+            base_ref=args.base_ref,
+            executor_id=args.executor,
+            rounds=args.rounds,
+            checks=checks,
+            output_dir=args.output_dir,
+            allow_dirty=args.allow_dirty,
+            check_timeout=args.check_timeout,
+            retry_count=settings.get("retry_count", 1),
+            context_window=settings.get("context_window", 3),
+        )
+        result = workflow.run()
+    except (ConfigError, RuntimeError, OSError, ValueError) as exc:
+        print(f"Maintainer error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    state = result.state.value if hasattr(result.state, "value") else str(result.state)
+    print(f"Maintainer state: {state}")
+    print(f"Workspace: {result.worktree or '(not created)'}")
+    print(f"Report: {result.report_path}")
+    if getattr(result, "reasons", None):
+        print("Attention required:")
+        for reason in result.reasons:
+            print(f"- {reason}")
+    return result
+
+
+def _split_check_command(command: str) -> list[str]:
+    argv = shlex.split(command, posix=os.name != "nt")
+    if os.name == "nt":
+        argv = [
+            value[1:-1]
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}
+            else value
+            for value in argv
+        ]
+    if not argv:
+        raise ValueError("--check commands must not be empty")
+    return argv
+
+
+def _cli_exit_code(outcome: object) -> int:
+    state = getattr(getattr(outcome, "state", None), "value", None)
+    if state is None:
+        return 0
+    return 0 if state == "awaiting_approval" else 1
 
 
 def _handle_waiting(orch: Orchestrator, renderer: TerminalRenderer) -> str | None:
@@ -346,4 +475,4 @@ def _run_manual(orch: Orchestrator, renderer: TerminalRenderer) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(_cli_exit_code(main()))
